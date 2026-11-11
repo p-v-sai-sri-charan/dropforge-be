@@ -24,3 +24,6 @@ def region_for_phone(phone: str) -> Optional[dict]:
         if hit:
             return {"country": hit[0], "currency": hit[1]}
     return None
+
+
+COUNTRY_CURRENCY = {cc: cur for cc, cur in CALLING_CODES.values()}

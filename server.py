@@ -20,6 +20,7 @@ from ratelimit import rate_limit
 import auth_routes
 import designs_routes
 import files_routes
+import geo
 import fonts_routes
 import badges_routes
 import moderation_routes
@@ -177,7 +178,7 @@ async def ai_generate_svg(body: SvgBody, request: Request, user: Optional[dict] 
 
 
 app.include_router(api_router)
-for r in (auth_routes.router, designs_routes.router, files_routes.router, fonts_routes.router, badges_routes.router, moderation_routes.router,
+for r in (geo.router, auth_routes.router, designs_routes.router, files_routes.router, fonts_routes.router, badges_routes.router, moderation_routes.router,
           orders_routes.router, store_routes.router, share_page.router):
     app.include_router(r)
 
