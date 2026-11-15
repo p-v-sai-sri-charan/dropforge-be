@@ -33,6 +33,27 @@ services:
     volumes:
       - dropforge_redis_data:/data
 
+  # Daily mongodump into ./backups. Files are named by weekday, so the last 7 days are kept and each is overwritten
+  # a week later (no cleanup job needed). Copy ./backups off this server too (it shares the VPS disk).
+  backup:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      DB_NAME: ${DB_NAME:-dropforge}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/$${DB_NAME}-$$(date +%a).archive.gz
+          mongodump --uri="mongodb://mongo:27017" --db="$$DB_NAME" --archive="$$f" --gzip && echo "backup ok: $$f"
+          sleep 86400
+        done
+    depends_on:
+      mongo:
+        condition: service_healthy
+
 volumes:
   dropforge_mongo_data:
   dropforge_redis_data:

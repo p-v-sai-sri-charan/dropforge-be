@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from config_store import LABELS, SIZES, load_config
+from config_store import LABELS, load_config
 from core import check_pin, client_ip, current_user, db
 
 router = APIRouter(prefix="/api")
@@ -74,7 +74,7 @@ async def resolve_item(user: dict, body: OrderIn) -> dict:
         if not design:
             raise HTTPException(404, "Save the design to your account first")
     product = design.get("product", "tee")
-    if body.size not in SIZES[product]:
+    if body.size not in cfg.products[product].sizes:
         raise HTTPException(400, "Pick a valid size")
     unit = cfg.products[product].prices[body.currency]
     return {"kind": "share" if body.share_slug else "custom", "design_id": design["id"], "name": design["name"], "product": product,

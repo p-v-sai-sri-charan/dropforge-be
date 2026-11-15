@@ -1,4 +1,5 @@
 """Admin-controlled print config: print areas and prices per product."""
+import re
 from typing import Dict, List
 
 from pydantic import BaseModel, Field, model_validator
@@ -26,10 +27,37 @@ class PrintArea(BaseModel):
         return self
 
 
+_HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
 class ProductConfig(BaseModel):
     front: PrintArea
     back: PrintArea
     prices: Dict[str, float]
+    colors: List[str] = []  # garment colors offered for THIS product (empty = filled with the defaults)
+    sizes: List[str] = []  # sizes offered for THIS product
+
+    @model_validator(mode="after")
+    def clean_options(self):
+        cols, seen = [], set()
+        for c in self.colors:
+            if not _HEX.match(c):
+                raise ValueError(f"Bad color {c}")
+            if c.upper() not in seen:
+                seen.add(c.upper())
+                cols.append(c.upper())
+        sizes, seen = [], set()
+        for z in self.sizes:
+            z = z.strip().upper()
+            if not z or len(z) > 12:
+                raise ValueError("Sizes must be 1 to 12 characters")
+            if z not in seen:
+                seen.add(z)
+                sizes.append(z)
+        if len(sizes) > 12 or len(cols) > 24:
+            raise ValueError("Too many sizes or colors")
+        self.colors, self.sizes = cols, sizes
+        return self
 
     @model_validator(mode="after")
     def all_prices(self):
@@ -51,6 +79,11 @@ class PrintConfig(BaseModel):
     def all_products(self):
         if set(self.products) != set(PRODUCTS):
             raise ValueError("Config must include every product: " + ", ".join(PRODUCTS))
+        for name, p in self.products.items():  # each product keeps its own colors and sizes; blanks take the defaults
+            if not p.colors:
+                p.colors = [c.upper() for c in self.colors]
+            if not p.sizes:
+                p.sizes = list(SIZES[name])
         return self
 
 

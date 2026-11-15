@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from core import check_pin, client_ip, current_user, db
@@ -188,10 +188,15 @@ async def _check_category(cid: str):
 
 
 @router.get("/catalog/products")
-async def list_products(category_id: Optional[str] = None, currency: Optional[Literal["INR", "USD", "GBP", "EUR", "AED"]] = None):
+async def list_products(
+    category_id: Optional[str] = None,
+    currency: Optional[Literal["INR", "USD", "GBP", "EUR", "AED"]] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=500),  # pages of e.g. 24 for infinite scroll; default keeps old callers working
+):
     # With a currency, only products priced in it are shown (no price / 0 = not sold in that region).
     q = {"status": "active", **({"category_id": category_id} if category_id else {}), **({f"prices.{currency}": {"$gt": 0}} if currency else {})}
-    return await _with_creators(await db.catalog_products.find(q, {"_id": 0}).sort("created_at", -1).to_list(500))
+    return await _with_creators(await db.catalog_products.find(q, {"_id": 0}).sort([("created_at", -1), ("id", 1)]).skip(skip).limit(limit).to_list(limit))
 
 
 @router.get("/catalog/products/{pid}")

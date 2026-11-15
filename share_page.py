@@ -6,7 +6,7 @@ import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
-from config_store import LABELS, SIZES, load_config
+from config_store import LABELS, load_config
 from core import db
 from store_routes import load_store
 
@@ -90,6 +90,7 @@ function body(){return{share_slug:SLUG,size:$('size').value,qty:+$('qty').value|
 function showPrice(){$('price').textContent=fmt(Math.round(PRICES[$('cur').value]*100)*(+$('qty').value||1),$('cur').value)}
 async function quote(){showPrice();if(!tok)return;try{const q=await call('/orders/quote',body());$('quote').textContent=q.discount?('SUBTOTAL '+fmt(q.subtotal,q.currency)+' · '+q.discount_label+' -'+q.discount_pct+'% · TOTAL '+fmt(q.total,q.currency)):'TOTAL '+fmt(q.total,q.currency);msg(q.code_error||'')}catch(e){$('quote').textContent='';msg(e.message)}}
 ['size','qty','cur'].forEach(i=>$(i).onchange=quote);$('applyBtn').onclick=quote;
+fetch(API+'/geo').then(r=>r.json()).then(g=>{if(g&&g.currency&&PRICES[g.currency]){$('cur').value=g.currency;quote()}}).catch(()=>{});
 function signedIn(){$('auth').classList.add('hidden');$('buy').classList.remove('hidden');quote()}
 let sent=false;$('authBtn').onclick=async()=>{const phone=$('phone').value.replace(/[\\s()-]/g,'');try{if(!sent){await call('/auth/send-otp',{phone});sent=true;$('codeBox').classList.remove('hidden');$('authBtn').textContent='VERIFY & CONTINUE';msg('Code sent',true)}
 else{const r=await call('/auth/verify-otp',{phone,code:$('code').value});tok=r.token;localStorage.setItem('df_token',tok);$('s_phone').value=phone;signedIn()}}catch(e){msg(e.message)}};
@@ -122,7 +123,7 @@ async def share_page(slug: str):
         .replace("__FRONT__", _face(d, "front", areas["front"], sh.get("front_image")))
         .replace("__BACK__", _face(d, "back", areas["back"], sh.get("back_image")))
         .replace("__FIRST__", first)
-        .replace("__SIZES__", "".join(f"<option{' selected' if s == 'M' else ''}>{s}</option>" for s in SIZES[product]))
+        .replace("__SIZES__", "".join(f"<option{' selected' if s == 'M' else ''}>{s}</option>" for s in cfg.products[product].sizes))
         .replace("__SLUG__", json.dumps(slug))
         .replace("__PRICES__", json.dumps(areas["prices"]))
     )

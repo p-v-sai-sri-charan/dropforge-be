@@ -52,10 +52,12 @@ def cld_fetch(rec: dict) -> bytes:
     return r.content
 
 
-async def store_file(data: bytes, ct: str, owner_id: str, public: bool) -> dict:
+async def store_file(data: bytes, ct: str, owner_id: str, public: bool, png_only: bool = False) -> dict:
     ALLOWED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
     if len(data) > MAX_BYTES:
         raise HTTPException(413, "Image is too large (max 8 MB)")
+    if png_only and not (ct == "image/png" and data[:8] == b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(400, "Only PNG files are accepted. Export your artwork as PNG and try again.")
     if ct not in ALLOWED or not (
         data[:8] == b"\x89PNG\r\n\x1a\n" or data[:3] == b"\xff\xd8\xff" or (data[:4] == b"RIFF" and data[8:12] == b"WEBP") or data[:3] == b"GIF"
     ):
@@ -127,7 +129,8 @@ def design_srcs(d: dict) -> list:
 async def upload(file: UploadFile = File(...), public: bool = False, user: dict = Depends(current_user)):
     if public and not await db.creators.find_one({"user_id": user["id"], "status": "approved"}, {"_id": 1}):
         raise HTTPException(403, "Only approved creators can upload product photos")
-    return await store_file(await file.read(), file.content_type or "", user["id"], public)
+    # Design artwork must be PNG; approved creators may still use JPEG/WEBP for shop product photos.
+    return await store_file(await file.read(), file.content_type or "", user["id"], public, png_only=not public)
 
 
 @router.post("/admin/upload")
