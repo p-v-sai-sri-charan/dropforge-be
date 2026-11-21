@@ -67,12 +67,20 @@ def _is_proxy(ip: str) -> bool:
 
 def client_ip(request: Request) -> str:
     """Visitor address from X-Forwarded-For: drop our load balancer (right-most), skip Cloudflare/private hops,
-    take the next one. Entries further left are client-controlled and ignored."""
+    take the next one. Entries further left are client-controlled and ignored.
+
+    X-Forwarded-For is itself attacker-controlled on any connection that did not actually come through our own
+    proxy, so it is trusted only when the direct TCP peer is a proxy we recognise (our load balancer / private
+    network, or Cloudflare's edge). Anyone else connecting straight to this port could otherwise forge the
+    header and dodge the per-IP limits below (OTP sends, rate limiting) by spoofing a fresh IP on every request."""
+    peer = request.client.host if request.client else None
+    if not peer or not _is_proxy(peer):
+        return peer or "?"
     chain = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
     for p in reversed(chain[:-1]):
         if not _is_proxy(p):
             return p
-    return chain[0] if chain else (request.client.host if request.client else "?")
+    return chain[0] if chain else peer
 
 
 # Admin access = signed in (OTP) with a phone listed in ADMIN_PHONES (comma separated).

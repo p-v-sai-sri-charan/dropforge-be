@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from core import current_user, db
+from svg_sanitize import sanitize_svg
 from files_routes import design_srcs, release_files
 
 router = APIRouter(prefix="/api")
@@ -45,11 +46,19 @@ class LayerM(BaseModel):
     @classmethod
     def no_inline_images(cls, v, info):
         kind = info.data.get("kind")
-        if kind == "image" and not v.startswith("/api/files/"):
-            raise ValueError("Images must be uploaded before saving")
-        if kind != "image" and (not v.lstrip().startswith("<svg") or len(v) > (300000 if kind in ("text", "badge") else 60000)):
+        if kind == "image":
+            if not v.startswith("/api/files/"):
+                raise ValueError("Images must be uploaded before saving")
+            return v
+        if not v.lstrip().startswith("<svg") or len(v) > (300000 if kind in ("text", "badge") else 60000):
             raise ValueError("Invalid graphic")
-        return v
+        # Untrusted input (nothing stops a client from PUTting a layer without going through our generators):
+        # strip to plain vector drawing so a saved layer can never carry a script or an external reference that
+        # "phones home" whenever it is next rendered - including in the admin's own production-sheet view.
+        try:
+            return sanitize_svg(v)
+        except ValueError:
+            raise ValueError("Invalid graphic")
 
 
 class DesignIn(BaseModel):
