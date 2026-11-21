@@ -74,7 +74,7 @@ __FIRST__
 <div id="quote" class="muted"></div>
 <label>NAME</label><input id="s_name"><label>PHONE</label><input id="s_phone"><label>ADDRESS</label><input id="s_line1">
 <div class="row"><div><label>CITY</label><input id="s_city"></div><div><label>POSTAL</label><input id="s_postal"></div></div>
-<label>COUNTRY</label><input id="s_country"><button id="payBtn">PAY BY CARD</button></div>
+<label>COUNTRY</label><input id="s_country"><p class="muted" id="cancelNote">NOTE: AN ORDER MAY BE CANCELLED IF THE UPLOADED IMAGE QUALITY IS TOO LOW FOR PRINTING OR IF ANY INAPPROPRIATE IMAGE IS UPLOADED. IF THAT HAPPENS, YOU WILL BE REFUNDED. CUSTOM DESIGN ORDERS CANNOT BE CANCELLED BY YOU; CONTACT SUPPORT IF YOU NEED HELP.</p><button id="payBtn">PAY BY CARD</button></div>
 <div id="msg"></div></div></div>
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <script>

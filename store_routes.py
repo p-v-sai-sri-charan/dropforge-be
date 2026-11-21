@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from core import check_pin, client_ip, current_user, db
-from files_routes import release_files
+from files_routes import design_srcs, release_files
 
 router = APIRouter(prefix="/api")
 now_iso = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
@@ -149,6 +149,7 @@ class ProductIn(BaseModel):
     prices: Dict[str, float]
     stock: Dict[str, int]
     status: Literal["active", "pending", "hidden"] = "active"
+    design_id: Optional[str] = Field(default=None, max_length=60)  # creators: a saved studio design this product is printed from
 
     @field_validator("photos")
     @classmethod
@@ -175,10 +176,16 @@ class ProductIn(BaseModel):
 
 
 async def _with_creators(docs: List[dict]) -> List[dict]:
+    for d in docs:  # never expose the artwork layers; the public only sees the preview photos
+        dz = d.pop("design", None)
+        if dz:
+            d["design_id"], d["design_name"] = dz.get("id"), dz.get("name")
     ids = {d["creator_id"] for d in docs if d.get("creator_id")}
-    names = {c["id"]: c["display_name"] async for c in db.creators.find({"id": {"$in": list(ids)}}, {"_id": 0, "id": 1, "display_name": 1})}
+    found = {c["id"]: c async for c in db.creators.find({"id": {"$in": list(ids)}}, {"_id": 0, "id": 1, "display_name": 1, "slug": 1})}
     for d in docs:
-        d["creator_name"] = names.get(d.get("creator_id"))
+        c = found.get(d.get("creator_id"))
+        d["creator_name"] = c["display_name"] if c else None
+        d["creator_slug"] = c.get("slug") if c else None
     return docs
 
 
@@ -217,7 +224,7 @@ async def admin_products(request: Request, x_admin_pin: Optional[str] = Header(N
 async def admin_add_product(body: ProductIn, request: Request, x_admin_pin: Optional[str] = Header(None)):
     admin(request, x_admin_pin)
     await _check_category(body.category_id)
-    doc = {**body.model_dump(), "id": str(uuid.uuid4()), "creator_id": None, "created_at": now_iso()}
+    doc = {**body.model_dump(exclude={"design_id"}), "id": str(uuid.uuid4()), "creator_id": None, "created_at": now_iso()}
     await db.catalog_products.insert_one(dict(doc))
     return doc
 
@@ -226,18 +233,18 @@ async def admin_add_product(body: ProductIn, request: Request, x_admin_pin: Opti
 async def admin_edit_product(pid: str, body: ProductIn, request: Request, x_admin_pin: Optional[str] = Header(None)):
     admin(request, x_admin_pin)
     await _check_category(body.category_id)
-    r = await db.catalog_products.update_one({"id": pid}, {"$set": body.model_dump()})
+    r = await db.catalog_products.update_one({"id": pid}, {"$set": body.model_dump(exclude={"design_id"})})
     if not r.matched_count:
         raise HTTPException(404, "Product not found")
-    return await db.catalog_products.find_one({"id": pid}, {"_id": 0})
+    return (await _with_creators([await db.catalog_products.find_one({"id": pid}, {"_id": 0})]))[0]
 
 
 @router.delete("/admin/products/{pid}")
 async def admin_delete_product(pid: str, request: Request, x_admin_pin: Optional[str] = Header(None)):
     admin(request, x_admin_pin)
-    p = await db.catalog_products.find_one({"id": pid}, {"_id": 0, "photos": 1})
+    p = await db.catalog_products.find_one({"id": pid}, {"_id": 0, "photos": 1, "design": 1})
     await db.catalog_products.delete_one({"id": pid})
-    removed = await release_files((p or {}).get("photos", []))
+    removed = await release_files((p or {}).get("photos", []) + (design_srcs(p["design"]) if p and p.get("design") else []))
     return {"ok": True, "images_removed": removed}
 
 
@@ -298,6 +305,8 @@ async def creator_me(user: dict = Depends(current_user)):
     c = await db.creators.find_one({"user_id": user["id"]}, {"_id": 0})
     if not c:
         return {"creator": None}
+    if c["status"] == "approved":
+        c = await _ensure_slug(c)
     earn = await db.earnings.find({"creator_id": c["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
     store = await load_store()
     return {"creator": _mask(c), "earnings": earn, "commission_pct": store.commission_pct}
@@ -306,37 +315,116 @@ async def creator_me(user: dict = Depends(current_user)):
 @router.get("/creators/products")
 async def creator_products(user: dict = Depends(current_user)):
     c = await _creator(user)
-    return await db.catalog_products.find({"creator_id": c["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return await _with_creators(await db.catalog_products.find({"creator_id": c["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500))
+
+
+async def _link_design(user: dict, design_id: str) -> dict:
+    """Snapshot of one of the creator's saved studio designs. Orders for the product carry this snapshot so the admin gets the
+    exact artwork placement. Only the preview images are made public; the artwork files stay private."""
+    d = await db.designs.find_one({"id": design_id, "user_id": user["id"]}, {"_id": 0, "user_id": 0})
+    if not d:
+        raise HTTPException(404, "Design not found. Save it in the studio first")
+    if not (d.get("front") or d.get("back")):
+        raise HTTPException(400, "That design is empty")
+    previews = [p for p in (d.get("thumb"), d.get("mockup")) if p]
+    await db.files.update_many({"path": {"$in": [p[len("/api/files/"):] for p in previews]}, "owner_id": user["id"]}, {"$set": {"public": True}})
+    return {k: d.get(k) for k in ("id", "name", "product", "color", "front", "back", "thumb", "mockup")}
 
 
 @router.post("/creators/products")
 async def creator_add_product(body: ProductIn, user: dict = Depends(current_user)):
     c = await _creator(user, approved=True)
     await _check_category(body.category_id)
-    doc = {**body.model_dump(), "status": "pending", "id": str(uuid.uuid4()), "creator_id": c["id"], "created_at": now_iso()}
+    if not body.design_id:
+        raise HTTPException(400, "Attach a design made in the studio so we can print your product exactly")
+    design = await _link_design(user, body.design_id)
+    doc = {**body.model_dump(exclude={"design_id"}), "status": "pending", "id": str(uuid.uuid4()), "creator_id": c["id"], "created_at": now_iso(), "design": design}
+    if not doc["photos"]:
+        doc["photos"] = [p for p in (design.get("thumb"), design.get("mockup")) if p]
     await db.catalog_products.insert_one(dict(doc))
-    doc.pop("_id", None)
-    return doc
+    return (await _with_creators([doc]))[0]
 
 
 @router.put("/creators/products/{pid}")
 async def creator_edit_product(pid: str, body: ProductIn, user: dict = Depends(current_user)):
     c = await _creator(user, approved=True)
     await _check_category(body.category_id)
-    r = await db.catalog_products.update_one({"id": pid, "creator_id": c["id"]}, {"$set": {**body.model_dump(), "status": "pending"}})
-    if not r.matched_count:
+    old = await db.catalog_products.find_one({"id": pid, "creator_id": c["id"]}, {"_id": 0})
+    if not old:
         raise HTTPException(404, "Product not found")
-    return await db.catalog_products.find_one({"id": pid}, {"_id": 0})
+    if not body.design_id and not old.get("design"):
+        raise HTTPException(400, "Attach a design made in the studio so we can print your product exactly")
+    patch = {**body.model_dump(exclude={"design_id"}), "status": "pending"}
+    design = old.get("design")
+    if body.design_id:
+        design = await _link_design(user, body.design_id)  # re-attaching the same design picks up its latest edits
+    if not patch["photos"] and design:
+        patch["photos"] = [p for p in (design.get("thumb"), design.get("mockup")) if p]
+    patch["design"] = design
+    await db.catalog_products.update_one({"id": pid, "creator_id": c["id"]}, {"$set": patch})
+    gone = [p for p in old.get("photos", []) if p not in patch["photos"]]
+    if old.get("design") and design and old["design"] != design:
+        gone += design_srcs(old["design"])
+    if gone:
+        await release_files(gone)
+    return (await _with_creators([await db.catalog_products.find_one({"id": pid}, {"_id": 0})]))[0]
 
 
 @router.delete("/creators/products/{pid}")
 async def creator_delete_product(pid: str, user: dict = Depends(current_user)):
     c = await _creator(user)
-    p = await db.catalog_products.find_one({"id": pid, "creator_id": c["id"]}, {"_id": 0, "photos": 1})
+    p = await db.catalog_products.find_one({"id": pid, "creator_id": c["id"]}, {"_id": 0, "photos": 1, "design": 1})
     if p:
         await db.catalog_products.delete_one({"id": pid, "creator_id": c["id"]})
-        await release_files(p.get("photos", []))
+        await release_files(p.get("photos", []) + (design_srcs(p["design"]) if p.get("design") else []))
     return {"ok": True}
+
+
+# ---------- creator storefronts ("sub stores") ----------
+RESERVED_SLUGS = {"admin", "api", "creator", "shop", "login", "studio", "checkout", "manage", "store", "stores", "orders", "product", "www", "dropforge"}
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,29}$")
+
+
+async def _ensure_slug(c: dict) -> dict:
+    if c.get("slug"):
+        return c
+    base = re.sub(r"[^a-z0-9]+", "-", c["display_name"].lower()).strip("-")[:24]
+    if len(base) < 3:
+        base = f"{base}-store".strip("-")
+    slug, n = base, 1
+    while slug in RESERVED_SLUGS or await db.creators.find_one({"slug": slug}, {"_id": 1}):
+        n += 1
+        slug = f"{base}-{n}"
+    await db.creators.update_one({"id": c["id"]}, {"$set": {"slug": slug}})
+    return {**c, "slug": slug}
+
+
+class StoreIn(BaseModel):
+    slug: str = Field(min_length=3, max_length=30)
+    bio: str = Field(default="", max_length=300)
+
+
+@router.put("/creators/me/store")
+async def creator_set_store(body: StoreIn, user: dict = Depends(current_user)):
+    c = await _creator(user, approved=True)
+    slug = body.slug.strip().lower()
+    if not SLUG_RE.match(slug) or slug in RESERVED_SLUGS:
+        raise HTTPException(400, "Store link: 3-30 letters, numbers or dashes, and not a reserved word")
+    if await db.creators.find_one({"slug": slug, "id": {"$ne": c["id"]}}, {"_id": 1}):
+        raise HTTPException(409, "That store link is taken")
+    await db.creators.update_one({"id": c["id"]}, {"$set": {"slug": slug, "bio": body.bio.strip()}})
+    return {"slug": slug, "bio": body.bio.strip()}
+
+
+@router.get("/stores/{slug}")
+async def creator_store(slug: str, currency: Optional[Literal["INR", "USD", "GBP", "EUR", "AED"]] = None):
+    """Public storefront: one creator's live products."""
+    c = await db.creators.find_one({"slug": slug.lower(), "status": "approved"}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Store not found")
+    q = {"creator_id": c["id"], "status": "active", **({f"prices.{currency}": {"$gt": 0}} if currency else {})}
+    products = await _with_creators(await db.catalog_products.find(q, {"_id": 0}).sort("created_at", -1).to_list(200))
+    return {"creator": {"display_name": c["display_name"], "slug": c["slug"], "bio": c.get("bio", "")}, "products": products}
 
 
 class CreatorReview(BaseModel):

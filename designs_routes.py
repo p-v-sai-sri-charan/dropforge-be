@@ -59,6 +59,7 @@ class DesignIn(BaseModel):
     front: List[LayerM] = Field(max_length=20)
     back: List[LayerM] = Field(max_length=20)
     thumb: Optional[str] = Field(default=None, max_length=300)
+    mockup: Optional[str] = Field(default=None, max_length=300)  # final front + back mockup PNG (used as the print reference on orders)
 
 
 @router.get("/designs")
@@ -79,11 +80,13 @@ async def put_design(design_id: str, body: DesignIn, user: dict = Depends(curren
     other = await db.designs.find_one({"id": design_id, "user_id": {"$ne": user["id"]}}, {"_id": 1})
     if other:
         raise HTTPException(409, "Design id already in use")
-    old = await db.designs.find_one({"id": design_id, "user_id": user["id"]}, {"_id": 0, "thumb": 1})
+    old = await db.designs.find_one({"id": design_id, "user_id": user["id"]}, {"_id": 0, "thumb": 1, "mockup": 1})
     doc = {**body.model_dump(), "id": design_id, "updatedAt": datetime.now(timezone.utc).isoformat()}
     await db.designs.update_one({"id": design_id, "user_id": user["id"]}, {"$set": {**doc, "user_id": user["id"]}}, upsert=True)
-    if old and old.get("thumb") and old["thumb"] != doc.get("thumb"):
-        await release_files([old["thumb"]])  # replaced preview; kept if an order or share still uses it
+    if old:
+        replaced = [old[k] for k in ("thumb", "mockup") if old.get(k) and old[k] != doc.get(k)]
+        if replaced:
+            await release_files(replaced)  # replaced previews; kept if an order or share still uses them
     return doc
 
 

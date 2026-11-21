@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, Up
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
-from core import check_pin, client_ip, current_user, db, optional_user
+from core import check_pin, client_ip, current_user, db, is_admin_phone, optional_user
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)
@@ -87,10 +87,11 @@ async def store_file(data: bytes, ct: str, owner_id: str, public: bool, png_only
 
 async def _in_use(src: str) -> bool:
     checks = [
-        (db.orders, ["photo", "design_snapshot.front.src", "design_snapshot.back.src", "design_snapshot.thumb", "design_snapshot.photos"]),
-        (db.designs, ["front.src", "back.src", "thumb"]),
-        (db.catalog_products, ["photos"]),
-        (db.shares, ["front_image", "back_image", "design.front.src", "design.back.src", "design.thumb"]),
+        (db.orders, ["photo", "design_snapshot.front.src", "design_snapshot.back.src", "design_snapshot.thumb", "design_snapshot.mockup", "design_snapshot.photos",
+                      "design_snapshot.design.front.src", "design_snapshot.design.back.src", "design_snapshot.design.thumb", "design_snapshot.design.mockup"]),
+        (db.designs, ["front.src", "back.src", "thumb", "mockup"]),
+        (db.catalog_products, ["photos", "design.front.src", "design.back.src", "design.thumb", "design.mockup"]),
+        (db.shares, ["front_image", "back_image", "design.front.src", "design.back.src", "design.thumb", "design.mockup"]),
     ]
     for coll, fields in checks:
         if await coll.find_one({"$or": [{f: src} for f in fields]}, {"_id": 1}):
@@ -122,7 +123,7 @@ async def release_files(srcs) -> int:
 
 
 def design_srcs(d: dict) -> list:
-    return [l["src"] for l in d.get("front", []) + d.get("back", []) if l.get("kind") == "image"] + [d.get("thumb")]
+    return [l["src"] for l in d.get("front", []) + d.get("back", []) if l.get("kind") == "image"] + [d.get("thumb"), d.get("mockup")]
 
 
 @router.post("/upload")
@@ -142,7 +143,16 @@ async def admin_upload(request: Request, file: UploadFile = File(...), x_admin_p
 @router.get("/files/{path:path}")
 async def get_file(path: str, user: Optional[dict] = Depends(optional_user)):
     rec = await db.files.find_one({"path": path, "is_deleted": False}, {"_id": 0})
-    if not rec or not (rec.get("public") or (user and rec["owner_id"] == user["id"])):
+    allowed = bool(rec) and (rec.get("public") or (user and rec["owner_id"] == user["id"]))
+    if rec and not allowed and user and is_admin_phone(user.get("phone")):
+        # Admins may open files that belong to an order (artwork they must print), nothing else.
+        src = f"/api/files/{path}"
+        allowed = bool(await db.orders.find_one(
+            {"$or": [{f: src} for f in ("design_snapshot.front.src", "design_snapshot.back.src", "design_snapshot.thumb", "design_snapshot.mockup", "photo",
+                                      "design_snapshot.design.front.src", "design_snapshot.design.back.src", "design_snapshot.design.thumb", "design_snapshot.design.mockup")]},
+            {"_id": 1},
+        ))
+    if not allowed:
         raise HTTPException(404, "File not found")
     try:
         cloudinary_ready()

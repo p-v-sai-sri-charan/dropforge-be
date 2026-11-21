@@ -116,15 +116,31 @@ class VerifyIn(BaseModel):
     razorpay_signature: str
 
 
+def cancel_policy(o: dict) -> str:
+    """Who may cancel what: custom designs and creator products never (customers contact support); only products the admin
+    listed in the shop, and only before the order is processed (printed / shipped)."""
+    if o["status"] in ("cancelled", "delivered"):
+        return "closed"
+    if o.get("kind") in ("custom", "share"):
+        return "custom"
+    if o.get("creator_id"):
+        return "creator"
+    return "allowed" if o["status"] in ("created", "paid") else "processed"
+
+
 def _public(o: dict) -> dict:
-    return {k: v for k, v in o.items() if k not in ("_id", "signature", "design_snapshot")}
+    out = {k: v for k, v in o.items() if k not in ("_id", "signature", "design_snapshot")}
+    pol = cancel_policy(o)
+    out["cancel_policy"] = pol
+    out["can_cancel"] = pol == "allowed" and o["status"] == "paid"
+    return out
 
 
 @router.get("/features")
 async def features():
     from auth_routes import sms_enabled
 
-    return {"payments": payments_enabled(), "sms": sms_enabled()}
+    return {"payments": payments_enabled(), "sms": sms_enabled(), "support": os.environ.get("SUPPORT_CONTACT", "")}
 
 
 @router.post("/orders")
@@ -139,6 +155,11 @@ async def create_order(body: OrderIn, user: dict = Depends(current_user)):
     item = q["item"]
     amount = q["total"]
     oid = str(uuid.uuid4())
+    areas = None
+    garment = item["product"] if item["product"] != "catalog" else (item["snapshot"].get("design") or {}).get("product")
+    if garment:
+        pc = (await load_config()).products[garment]
+        areas = {"front": pc.front.model_dump(), "back": pc.back.model_dump()}  # print areas as they were when ordered
     rzp = razorpay.Client(auth=(os.environ["RAZORPAY_KEY_ID"], os.environ["RAZORPAY_KEY_SECRET"]))
     try:
         r = await run_in_threadpool(
@@ -174,6 +195,7 @@ async def create_order(body: OrderIn, user: dict = Depends(current_user)):
         "history": [{"status": "created", "at": datetime.now(timezone.utc).isoformat()}],
         "razorpay_order_id": r["id"],
         "design_snapshot": item["snapshot"],
+        "print_areas": areas,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.orders.insert_one(dict(order))
@@ -265,13 +287,55 @@ async def set_status(oid: str, body: StatusIn, request: Request, x_admin_pin: Op
             await db.catalog_products.update_one({"id": o["product_id"]}, {"$inc": {f"stock.{o['size']}": o["qty"]}})
         await db.earnings.update_many({"order_id": oid, "status": "pending"}, {"$set": {"status": "void"}})
     now = datetime.now(timezone.utc).isoformat()
-    await db.orders.update_one({"id": oid}, {"$set": {"status": body.status}, "$push": {"history": {"status": body.status, "at": now}}})
+    patch = {"status": body.status, **({"refund_due": True} if body.status == "cancelled" else {})}
+    await db.orders.update_one({"id": oid}, {"$set": patch, "$push": {"history": {"status": body.status, "at": now}}})
     phone = o.get("phone") or (await db.users.find_one({"id": o["user_id"]}, {"phone": 1}) or {}).get("phone")
     sms = bool(phone) and await run_in_threadpool(
         send_sms, phone, f"DropForge: your order #{oid[:8].upper()} ({o['design_name']}) is now {body.status.upper()}."
     )
     doc = await db.orders.find_one({"id": oid})
     return {**_public(doc), "sms_sent": sms}
+
+
+SUPPORT_HINT = "Custom design orders can't be cancelled. If you need help, contact support."
+CANCEL_MESSAGES = {
+    "custom": SUPPORT_HINT,
+    "creator": "Orders for a creator's design can't be cancelled. If you need help, contact support.",
+    "processed": "This order is already being processed and can't be cancelled. If you need help, contact support.",
+    "closed": "This order is already closed.",
+}
+
+
+@router.post("/orders/{oid}/cancel")
+async def cancel_my_order(oid: str, user: dict = Depends(current_user)):
+    o = await db.orders.find_one({"id": oid, "user_id": user["id"]})
+    if not o:
+        raise HTTPException(404, "Order not found")
+    pol = cancel_policy(o)
+    if pol != "allowed":
+        raise HTTPException(400, CANCEL_MESSAGES[pol])
+    if o["status"] != "paid":
+        raise HTTPException(400, "This order hasn't been paid, so there is nothing to cancel")
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.orders.update_one(
+        {"_id": o["_id"], "status": "paid"},  # only while still unprocessed
+        {"$set": {"status": "cancelled", "refund_due": True, "cancelled_by": "customer"}, "$push": {"history": {"status": "cancelled", "at": now}}},
+    )
+    if not r.modified_count:
+        raise HTTPException(400, CANCEL_MESSAGES["processed"])
+    if o.get("product_id") and not o.get("stock_issue"):
+        await db.catalog_products.update_one({"id": o["product_id"]}, {"$inc": {f"stock.{o['size']}": o["qty"]}})
+    return _public(await db.orders.find_one({"_id": o["_id"]}))
+
+
+@router.post("/admin/orders/{oid}/refunded")
+async def mark_refunded(oid: str, request: Request, x_admin_pin: Optional[str] = Header(None)):
+    check_pin(x_admin_pin, client_ip(request))
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.orders.update_one({"id": oid, "status": "cancelled", "refund_due": True}, {"$set": {"refund_due": False, "refunded_at": now}})
+    if not r.matched_count:
+        raise HTTPException(404, "No refund is due for this order")
+    return _public(await db.orders.find_one({"id": oid}))
 
 
 @router.get("/orders")
@@ -285,3 +349,44 @@ async def admin_orders(request: Request, x_admin_pin: Optional[str] = Header(Non
     check_pin(x_admin_pin, client_ip(request))
     docs = await db.orders.find({}).sort("created_at", -1).to_list(200)
     return [_public(d) for d in docs]
+
+
+def _layer_out(l: dict) -> dict:
+    return {k: l.get(k) for k in ("id", "kind", "src", "x", "y", "scale", "rotation", "text", "badge")}
+
+
+@router.get("/admin/orders/{oid}/production")
+async def order_production(oid: str, request: Request, x_admin_pin: Optional[str] = Header(None)):
+    """Everything needed to print an order: the customer's (or creator's) final mockup plus every layer (images, text, AI art,
+    badges) with its exact placement inside the print area."""
+    check_pin(x_admin_pin, client_ip(request))
+    o = await db.orders.find_one({"id": oid}, {"_id": 0})
+    if not o:
+        raise HTTPException(404, "Order not found")
+    snap = o.get("design_snapshot") or {}
+    art = snap.get("design") if o.get("kind") == "catalog" else snap  # creator products carry the design they were made from
+    art = art or {}
+    garment = art.get("product") if art else None
+    areas = o.get("print_areas")
+    if not areas and (garment or o.get("product") != "catalog"):
+        pc = (await load_config()).products.get(garment or o.get("product", "tee"))
+        areas = {"front": pc.front.model_dump(), "back": pc.back.model_dump()} if pc else None
+    creator = None
+    if o.get("creator_id"):
+        c = await db.creators.find_one({"id": o["creator_id"]}, {"_id": 0, "display_name": 1, "slug": 1, "phone": 1})
+        creator = c
+    return {
+        "order": _public(o),
+        "creator": creator,
+        "design": {
+            "name": art.get("name") or o.get("design_name"),
+            "product": garment or o.get("product"),
+            "color": art.get("color") or o.get("color"),
+            "mockup": art.get("mockup"),
+            "thumb": art.get("thumb"),
+            "photos": snap.get("photos") or [],
+            "front": [_layer_out(l) for l in art.get("front", [])],
+            "back": [_layer_out(l) for l in art.get("back", [])],
+        },
+        "areas": areas,
+    }

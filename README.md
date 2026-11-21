@@ -23,6 +23,7 @@ Mongo and Redis are only reachable inside the compose network. A `backup` servic
 | `DB_NAME`, `MONGO_URL`, `REDIS_URL` | Set by docker-compose; override for local runs |
 | `CORS_ORIGINS` | Comma-separated allowed web origins (localhost is always allowed) |
 | `ADMIN_PHONES` | Comma-separated phones that get admin access after OTP login |
+| `SUPPORT_CONTACT` | Support email / phone shown to customers (custom design orders can only be changed through support) |
 | `ANTHROPIC_API_KEY` | Claude: AI ideas, vector graphics, safety checks |
 | `OPENAI_API_KEY` | AI PNG images (gpt-image) |
 | `OPENAI_IMAGE_MODEL`, `OPENAI_IMAGE_QUALITY`, `AI_FREE_IMAGES_PER_MONTH` | Optional image settings (defaults `gpt-image-1`, `medium`, `3`) |
