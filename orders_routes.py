@@ -14,6 +14,8 @@ from starlette.concurrency import run_in_threadpool
 
 from config_store import LABELS, load_config
 from core import check_pin, client_ip, current_user, db
+from push import notify_user
+from tracking_routes import Attribution
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)
@@ -41,6 +43,7 @@ class OrderIn(BaseModel):
     currency: Literal["INR", "USD", "GBP", "EUR", "AED"]
     discount_code: Optional[str] = Field(default=None, max_length=20)
     shipping: Optional[Shipping] = None
+    attribution: Optional[Attribution] = None  # campaign / link the customer came from (promotion tracking)
 
 
 PAID_STATES = ["paid", "printed", "shipped", "delivered"]
@@ -196,6 +199,7 @@ async def create_order(body: OrderIn, user: dict = Depends(current_user)):
         "razorpay_order_id": r["id"],
         "design_snapshot": item["snapshot"],
         "print_areas": areas,
+        "attribution": (body.attribution.clean() if body.attribution else None) or user.get("attribution"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.orders.insert_one(dict(order))
@@ -247,6 +251,7 @@ async def verify_order(body: VerifyIn, user: dict = Depends(current_user)):
                 "id": str(uuid.uuid4()), "creator_id": saved["creator_id"], "order_id": saved["id"], "product_name": saved["design_name"],
                 "currency": saved["currency"], "pct": pct, "amount": int(round(saved["amount"] * pct / 100)), "status": "pending", "created_at": now,
             })
+        await notify_user(saved["user_id"], "Order confirmed", f"We got your order for {saved['design_name']}. We'll let you know when it ships.", {"url": "/orders"})
     doc = await db.orders.find_one({"_id": saved["_id"]})
     return _public(doc)
 
@@ -293,9 +298,18 @@ async def set_status(oid: str, body: StatusIn, request: Request, x_admin_pin: Op
     sms = bool(phone) and await run_in_threadpool(
         send_sms, phone, f"DropForge: your order #{oid[:8].upper()} ({o['design_name']}) is now {body.status.upper()}."
     )
+    pushed = await notify_user(o["user_id"], PUSH_TITLES[body.status], f"Order #{oid[:8].upper()} - {o['design_name']}", {"url": "/orders"})
     doc = await db.orders.find_one({"id": oid})
-    return {**_public(doc), "sms_sent": sms}
+    return {**_public(doc), "sms_sent": sms, "push_sent": pushed}
 
+
+PUSH_TITLES = {
+    "paid": "Order confirmed",
+    "printed": "Your order is printed",
+    "shipped": "Your order has shipped",
+    "delivered": "Your order was delivered",
+    "cancelled": "Your order was cancelled",
+}
 
 SUPPORT_HINT = "Custom design orders can't be cancelled. If you need help, contact support."
 CANCEL_MESSAGES = {
@@ -335,7 +349,9 @@ async def mark_refunded(oid: str, request: Request, x_admin_pin: Optional[str] =
     r = await db.orders.update_one({"id": oid, "status": "cancelled", "refund_due": True}, {"$set": {"refund_due": False, "refunded_at": now}})
     if not r.matched_count:
         raise HTTPException(404, "No refund is due for this order")
-    return _public(await db.orders.find_one({"id": oid}))
+    o = await db.orders.find_one({"id": oid})
+    await notify_user(o["user_id"], "Refund issued", f"Your refund for {o['design_name']} is on its way.", {"url": "/orders"})
+    return _public(o)
 
 
 @router.get("/orders")

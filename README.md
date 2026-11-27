@@ -39,3 +39,14 @@ Mongo and Redis are only reachable inside the compose network. A `backup` servic
 pip install -r requirements-dev.txt
 uvicorn server:app --reload --port 8001
 ```
+
+## Promotion tracking & push notifications
+
+- `POST /api/track` - anonymous funnel events from the app/website (visit, product_view, design_started, checkout_started)
+  with the visitor's campaign (UTM tags). Events expire after ~13 months. Orders store `attribution` (campaign that brought
+  the customer); `GET /api/admin/marketing/campaigns?days=30` reports visitors, funnel steps, paid orders and revenue
+  per source/campaign.
+- `POST /api/push/register|unregister`, `GET/PUT /api/push/prefs` - app devices (Expo push tokens) and the customer's
+  "offers" opt-out. Order status changes, confirmations and refunds notify the customer automatically (`push.py`).
+- `POST /api/admin/push/broadcast` - promotion to every app user who hasn't opted out (`dry_run: true` counts devices).
+- `EXPO_ACCESS_TOKEN` (optional) - only if "enhanced push security" is on in the Expo project.
