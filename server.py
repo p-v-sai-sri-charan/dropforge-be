@@ -30,6 +30,7 @@ import share_page
 import store_routes
 import tracking_routes
 import push_routes
+import account_routes
 
 anthropic_client = AsyncAnthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
 CLAUDE_MODEL = "claude-sonnet-5-5"
@@ -182,7 +183,7 @@ async def ai_generate_svg(body: SvgBody, request: Request, user: Optional[dict] 
 
 app.include_router(api_router)
 for r in (geo.router, auth_routes.router, designs_routes.router, files_routes.router, imagegen_routes.router, fonts_routes.router, badges_routes.router, moderation_routes.router,
-          orders_routes.router, store_routes.router, share_page.router, tracking_routes.router, push_routes.router):
+          orders_routes.router, store_routes.router, share_page.router, tracking_routes.router, push_routes.router, account_routes.router):
     app.include_router(r)
 
 
