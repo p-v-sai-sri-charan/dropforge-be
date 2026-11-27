@@ -14,6 +14,7 @@ RULES = [
     ("/api/ai", "ai", int(os.environ.get("RATE_LIMIT_AI_PER_MIN", "20"))),
     ("/api/upload", "upload", int(os.environ.get("RATE_LIMIT_UPLOAD_PER_MIN", "30"))),
     ("/api/admin", "admin", int(os.environ.get("RATE_LIMIT_ADMIN_PER_MIN", "60"))),
+    ("/api/track", "track", int(os.environ.get("RATE_LIMIT_TRACK_PER_MIN", "60"))),  # anonymous analytics writes
 ]
 EXEMPT = ("/api/health",)
 

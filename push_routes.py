@@ -60,7 +60,7 @@ async def set_prefs(body: PrefsIn, user: dict = Depends(current_user)):
 class BroadcastIn(BaseModel):
     title: str = Field(min_length=2, max_length=60)
     body: str = Field(min_length=2, max_length=180)
-    url: Optional[str] = Field(default=None, max_length=200, pattern=r"^/[A-Za-z0-9/_\-?=&.%]*$")  # in-app path opened on tap
+    url: Optional[str] = Field(default=None, max_length=200, pattern=r"^/([A-Za-z0-9_\-?=&.%][A-Za-z0-9/_\-?=&.%]*)?$")  # in-app path opened on tap (never "//host")
     dry_run: bool = True
 
 
