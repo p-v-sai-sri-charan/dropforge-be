@@ -34,7 +34,7 @@ services:
       - dropforge_redis_data:/data
 
   # Daily mongodump into ./backups. Files are named by weekday, so the last 7 days are kept and each is overwritten
-  # a week later (no cleanup job needed). Copy ./backups off this server too (it shares the VPS disk).
+  # a week later (no cleanup job needed). The offsite service below copies them to R2.
   backup:
     image: mongo:7
     restart: unless-stopped
@@ -53,6 +53,17 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+
+  # Off-site copy of those dumps in Cloudflare R2 (does nothing until the R2_* variables are set in .env).
+  offsite:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./backups:/backups:ro
+    command: ["python", "scripts/backup_to_r2.py", "--loop"]
+    healthcheck:
+      disable: true
 
 volumes:
   dropforge_mongo_data:

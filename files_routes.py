@@ -1,4 +1,4 @@
-"""Image uploads to Cloudinary + owner-checked downloads."""
+"""Image uploads (Cloudflare R2 or Cloudinary, see storage.py) + owner-checked downloads and resized thumbnails."""
 import io
 import logging
 import os
@@ -10,10 +10,11 @@ import cloudinary
 import cloudinary.uploader
 import cloudinary.utils
 import requests
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 
+import storage
 from core import check_pin, client_ip, current_user, db, is_admin_phone, optional_user
 
 router = APIRouter(prefix="/api")
@@ -52,6 +53,34 @@ def cld_fetch(rec: dict) -> bytes:
     return r.content
 
 
+EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+
+
+def fetch_bytes(rec: dict) -> bytes:
+    """Original bytes of a stored file, wherever it lives (blocking: call in a thread)."""
+    if rec.get("provider") == "r2":
+        return storage.r2_get(rec["bucket"], rec["key"])
+    cloudinary_ready()
+    return cld_fetch(rec)
+
+
+def _thumb_place(rec: dict, w: int):
+    """(bucket, key) for a variant: next to an R2 original; Cloudinary originals get theirs in the private bucket."""
+    if rec.get("provider") == "r2":
+        return rec["bucket"], storage.thumb_key(rec["key"], w)
+    return storage.bucket(False), storage.thumb_key(rec["path"], w)
+
+
+def _delete_stored(rec: dict):
+    for w in rec.get("thumbs", []):
+        b, k = _thumb_place(rec, w)
+        storage.r2_delete(b, [k])
+    if rec.get("provider") == "r2":
+        storage.r2_delete(rec["bucket"], [rec["key"]])
+    else:
+        cloudinary.uploader.destroy(rec["public_id"], resource_type="image", type=rec["delivery_type"], invalidate=True)
+
+
 async def store_file(data: bytes, ct: str, owner_id: str, public: bool, png_only: bool = False) -> dict:
     ALLOWED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
     if len(data) > MAX_BYTES:
@@ -71,16 +100,27 @@ async def store_file(data: bytes, ct: str, owner_id: str, public: bool, png_only
         "is_deleted": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    if not cloudinary_ready():
+    backend = storage.upload_backend()
+    if not backend:
         raise HTTPException(503, "Image storage is not configured")
     try:
-        res = await run_in_threadpool(cld_upload, data, owner_id, public)
+        if backend == "r2":
+            ext = EXT[ct]
+            key = f"{'public' if public else 'private'}/{owner_id}/{rec['id']}.{ext}"
+            b = storage.bucket(public)
+            await run_in_threadpool(storage.r2_put, b, key, data, ct, "public, max-age=31536000, immutable" if public else "private, max-age=86400")
+            path = f"r2/{rec['id']}.{ext}"
+            rec.update(path=path, provider="r2", bucket=b, key=key)
+        else:
+            res = await run_in_threadpool(cld_upload, data, owner_id, public)
+            path = f"cld/{res['public_id']}.{res['format']}"
+            rec.update(path=path, provider="cloudinary", public_id=res["public_id"], format=res["format"],
+                       delivery_type=res.get("type", "upload"), cloud_url=res["secure_url"])
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning("cloudinary upload failed: %s", e)
+        logger.warning("%s upload failed: %s", backend, e)
         raise HTTPException(502, "Upload failed, try again")
-    path = f"cld/{res['public_id']}.{res['format']}"
-    rec.update(path=path, provider="cloudinary", public_id=res["public_id"], format=res["format"],
-               delivery_type=res.get("type", "upload"), cloud_url=res["secure_url"])
     await db.files.insert_one(rec)
     return {"path": path, "url": f"/api/files/{path}"}
 
@@ -109,13 +149,11 @@ async def release_files(srcs) -> int:
         rec = await db.files.find_one({"path": src[len("/api/files/"):], "is_deleted": False})
         if not rec:
             continue
-        if rec.get("provider") == "cloudinary" and cloudinary_ready():
+        if (rec.get("provider") == "r2" and storage.r2_ready()) or (rec.get("provider") == "cloudinary" and cloudinary_ready()):
             try:
-                await run_in_threadpool(
-                    lambda: cloudinary.uploader.destroy(rec["public_id"], resource_type="image", type=rec["delivery_type"], invalidate=True)
-                )
+                await run_in_threadpool(_delete_stored, rec)
             except Exception as e:
-                logger.warning("cloudinary delete failed: %s", e)
+                logger.warning("storage delete failed: %s", e)
                 continue
         await db.files.update_one({"_id": rec["_id"]}, {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat()}})
         removed += 1
@@ -141,7 +179,8 @@ async def admin_upload(request: Request, file: UploadFile = File(...), x_admin_p
 
 
 @router.get("/files/{path:path}")
-async def get_file(path: str, user: Optional[dict] = Depends(optional_user)):
+async def get_file(path: str, user: Optional[dict] = Depends(optional_user), w: Optional[int] = Query(None, ge=1, le=4000)):
+    """The image, or with ?w= a WEBP no wider than that (rounded up to 240/480/960; larger = the original)."""
     rec = await db.files.find_one({"path": path, "is_deleted": False}, {"_id": 0})
     allowed = bool(rec) and (rec.get("public") or (user and rec["owner_id"] == user["id"]))
     if rec and not allowed and user and is_admin_phone(user.get("phone")):
@@ -154,10 +193,39 @@ async def get_file(path: str, user: Optional[dict] = Depends(optional_user)):
         ))
     if not allowed:
         raise HTTPException(404, "File not found")
+    width = next((t for t in storage.THUMB_WIDTHS if w and w <= t), None)
+    public = bool(rec.get("public"))
+    cache = "public, max-age=604800" if public else "private, max-age=86400"
+    base = storage.public_base()
+    if width and rec.get("content_type") != "image/gif":
+        if width in rec.get("thumbs", []):
+            b, k = _thumb_place(rec, width)
+            if public and base and b == storage.bucket(True):
+                return RedirectResponse(f"{base}/{k}", 302, headers={"Cache-Control": "public, max-age=86400"})
+            try:
+                data = await run_in_threadpool(storage.r2_get, b, k)
+                return Response(content=data, media_type="image/webp", headers={"Cache-Control": cache})
+            except Exception:
+                pass  # missing variant: make it again below
+        try:
+            original = await run_in_threadpool(fetch_bytes, rec)
+        except Exception:
+            raise HTTPException(502, "Could not load file")
+        small = await run_in_threadpool(storage.make_thumb, original, width)
+        if small is None:
+            return Response(content=original, media_type=rec["content_type"], headers={"Cache-Control": cache})
+        if storage.r2_ready():
+            try:
+                b, k = _thumb_place(rec, width)
+                await run_in_threadpool(storage.r2_put, b, k, small, "image/webp", "public, max-age=31536000, immutable" if public else "private, max-age=86400")
+                await db.files.update_one({"path": path}, {"$addToSet": {"thumbs": width}})
+            except Exception as e:
+                logger.info("thumbnail not cached: %s", e)
+        return Response(content=small, media_type="image/webp", headers={"Cache-Control": cache})
+    if public and base and rec.get("provider") == "r2" and rec.get("bucket") == storage.bucket(True):
+        return RedirectResponse(f"{base}/{rec['key']}", 302, headers={"Cache-Control": "public, max-age=86400"})
     try:
-        cloudinary_ready()
-        data = await run_in_threadpool(cld_fetch, rec)
-    except requests.RequestException:
+        data = await run_in_threadpool(fetch_bytes, rec)
+    except Exception:
         raise HTTPException(502, "Could not load file")
-    cache = "public, max-age=86400" if rec.get("public") else "private, max-age=86400"
     return Response(content=data, media_type=rec["content_type"], headers={"Cache-Control": cache})

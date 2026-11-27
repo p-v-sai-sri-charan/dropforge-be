@@ -12,6 +12,8 @@ python-dotenv==1.2.4
 python-multipart==0.0.32
 anthropic>=0.40.0
 cloudinary==1.46.3
+boto3==1.40.76  # Cloudflare R2 (S3 API) storage + off-site backups
+Pillow==11.3.0  # thumbnails
 razorpay==2.0.1
 setuptools<81
 defusedxml==0.7.1  # safe SVG/XML parsing for saved design layers (svg_sanitize.py)
