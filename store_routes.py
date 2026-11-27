@@ -200,9 +200,14 @@ async def list_products(
     currency: Optional[Literal["INR", "USD", "GBP", "EUR", "AED"]] = None,
     skip: int = Query(0, ge=0),
     limit: int = Query(500, ge=1, le=500),  # pages of e.g. 24 for infinite scroll; default keeps old callers working
+    q: Optional[str] = Query(None, max_length=60),  # shop search: every word must appear in the name, description or tags
 ):
     # With a currency, only products priced in it are shown (no price / 0 = not sold in that region).
-    q = {"status": "active", **({"category_id": category_id} if category_id else {}), **({f"prices.{currency}": {"$gt": 0}} if currency else {})}
+    query = {"status": "active", **({"category_id": category_id} if category_id else {}), **({f"prices.{currency}": {"$gt": 0}} if currency else {})}
+    words = [w for w in re.split(r"\s+", (q or "").strip()) if w][:6]
+    if words:
+        query["$and"] = [{"$or": [{f: {"$regex": re.escape(w), "$options": "i"}} for f in ("name", "description", "tags")]} for w in words]
+    q = query
     return await _with_creators(await db.catalog_products.find(q, {"_id": 0}).sort([("created_at", -1), ("id", 1)]).skip(skip).limit(limit).to_list(limit))
 
 

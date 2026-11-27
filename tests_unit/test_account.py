@@ -2,8 +2,8 @@ import os, sys, asyncio, hashlib
 from mongomock_motor import AsyncMongoMockClient
 import core
 mdb = AsyncMongoMockClient()["t3"]; core.db = mdb
-import files_routes, account_routes
-files_routes.db = mdb; account_routes.db = mdb
+import files_routes, account_routes, reviews_routes
+files_routes.db = mdb; account_routes.db = mdb; reviews_routes.db = mdb
 
 import pytest
 
@@ -12,7 +12,7 @@ import pytest
 def _this_modules_db():
     """Each test module has its own in-memory database; point the shared sign-in code (core.db) at it."""
     core.db = mdb
-    for m in (files_routes, account_routes,):
+    for m in (files_routes, account_routes, reviews_routes):
         m.db = mdb
 
 files_routes.cloudinary_ready = lambda: False

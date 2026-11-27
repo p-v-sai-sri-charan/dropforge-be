@@ -10,6 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+import reviews_routes
 from core import current_user, db, is_admin_phone
 from files_routes import design_srcs, release_files
 
@@ -71,6 +72,10 @@ async def delete_account(body: DeleteIn, user: dict = Depends(current_user)):
         await db.catalog_products.update_many({"creator_id": c["id"]}, {"$set": {"status": "hidden", "creator_deleted": True}})
         await db.creators.delete_one({"user_id": uid})
 
+    reviewed = [r["product_id"] async for r in db.reviews.find({"user_id": uid}, {"product_id": 1})]
+    await db.reviews.delete_many({"user_id": uid})
+    for pid in reviewed:
+        await reviews_routes.refresh_rating(pid)
     for coll in (db.push_tokens, db.ai_keys, db.ai_credits, db.ai_images):
         await coll.delete_many({"user_id": uid})
     await db.events.update_many({"user_id": uid}, {"$set": {"user_id": None}})
