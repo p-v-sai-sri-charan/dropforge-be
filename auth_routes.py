@@ -9,6 +9,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
+import phonenumbers
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
@@ -37,7 +38,39 @@ def _twilio():
 
 
 def _norm(phone: str) -> str:
-    return re.sub(r"[\s\-()]", "", phone)
+    """Canonical +E.164 form when the number parses (e.g. drops a stray trunk 0: +9109876... -> +919876...)."""
+    raw = re.sub(r"[\s\-().]", "", phone)
+    try:
+        return phonenumbers.format_number(phonenumbers.parse(raw, None), phonenumbers.PhoneNumberFormat.E164)
+    except phonenumbers.NumberParseException:
+        return raw
+
+
+SMS_TYPES = {phonenumbers.PhoneNumberType.MOBILE, phonenumbers.PhoneNumberType.FIXED_LINE_OR_MOBILE}
+
+
+def _check_number(phone: str):
+    """Reject numbers that can't get an SMS before asking Twilio (a wrong length is the usual cause: the country code typed twice)."""
+    try:
+        n = phonenumbers.parse(phone, None)
+    except phonenumbers.NumberParseException:
+        raise HTTPException(400, "Enter your number with country code, e.g. +919876543210")
+    if not phonenumbers.is_valid_number(n):
+        raise HTTPException(400, f"{phone} isn't a valid phone number. Check the country and that the country code isn't typed twice")
+    if phonenumbers.number_type(n) not in SMS_TYPES:
+        raise HTTPException(400, "This looks like a landline. Use a mobile number that can receive SMS")
+
+
+# What Twilio's error codes mean for the customer
+TWILIO_ERRORS = {
+    21211: "That phone number isn't valid. Check the country and number",
+    21614: "This number can't receive SMS. Use a mobile number",
+    21408: "We can't send codes to this country yet",
+    60200: "That phone number isn't valid. Check the country and number",
+    60203: "Too many codes sent to this number. Wait 10 minutes and try again",
+    60410: "Code sending to this number is temporarily blocked. Try again later or contact support",
+    60605: "We can't send codes to this country yet",
+}
 
 
 UNSUPPORTED = "Sign-in is available for India, US, UK, UAE and Euro-zone phone numbers only"
@@ -121,6 +154,7 @@ async def send_otp(body: PhoneBody, request: Request):
         raise HTTPException(400, "Enter your number with country code, e.g. +919876543210")
     if not region_for_phone(phone):
         raise HTTPException(400, UNSUPPORTED)
+    _check_number(phone)
     ip = client_ip(request)
     if await db.otp_sends.count_documents({"phone": phone, "at": {"$gte": _since(minutes=10)}}) >= PER_PHONE_10MIN:
         raise HTTPException(429, "Too many codes requested. Try again in 10 minutes")
@@ -130,13 +164,15 @@ async def send_otp(body: PhoneBody, request: Request):
         raise HTTPException(429, "Login codes are busy right now. Please try again shortly")
     if not sms_enabled():
         raise HTTPException(503, "SMS login isn't set up yet. The store owner needs to add Twilio keys")
-    await db.otp_sends.insert_one({"phone": phone, "ip": ip, "at": datetime.now(timezone.utc)})
+    sent = await db.otp_sends.insert_one({"phone": phone, "ip": ip, "at": datetime.now(timezone.utc)})
     try:
-        await run_in_threadpool(lambda: _twilio().verifications.create(to=phone, channel="sms"))
+        v = await run_in_threadpool(lambda: _twilio().verifications.create(to=phone, channel="sms"))
+        logger.info("otp sent to %s****%s (verify %s, status %s)", phone[:4], phone[-2:], getattr(v, "sid", "?"), getattr(v, "status", "?"))
     except TwilioRestException as e:
-        logger.warning("twilio send failed: %s", e)
-        raise HTTPException(400, "Couldn't send a code to this number")
-    return {"sent": True}
+        await db.otp_sends.delete_one({"_id": sent.inserted_id})  # a send Twilio refused doesn't count toward the limits
+        logger.warning("twilio send failed for %s****%s: code=%s %s", phone[:4], phone[-2:], e.code, e.msg)
+        raise HTTPException(400, TWILIO_ERRORS.get(e.code, "Couldn't send a code to this number. Check it and try again"))
+    return {"sent": True, "phone": phone}
 
 
 @router.post("/verify-otp")
@@ -159,6 +195,11 @@ async def verify_otp(body: VerifyBody):
         await db.otp_fails.insert_one({"phone": phone, "at": datetime.now(timezone.utc)})
         raise HTTPException(400, "Wrong or expired code")
     user = await db.users.find_one({"phone": phone}, {"_id": 0})
+    raw = re.sub(r"[\s\-().]", "", body.phone)
+    if not user and raw != phone:
+        # accounts made before numbers were canonicalised (e.g. saved as +9109876...) move to the clean form
+        if (await db.users.update_one({"phone": raw}, {"$set": {"phone": phone}})).modified_count:
+            user = await db.users.find_one({"phone": phone}, {"_id": 0})
     if not user:
         user = {"id": str(uuid.uuid4()), "phone": phone, "created_at": datetime.now(timezone.utc).isoformat()}
         await db.users.insert_one(dict(user))
