@@ -45,6 +45,7 @@ import push_routes
 import account_routes
 import email_routes
 import reviews_routes
+import analytics_routes
 import reminders
 
 anthropic_client = AsyncAnthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
@@ -199,7 +200,7 @@ async def ai_generate_svg(body: SvgBody, request: Request, user: Optional[dict] 
 app.include_router(api_router)
 for r in (geo.router, auth_routes.router, designs_routes.router, files_routes.router, imagegen_routes.router, fonts_routes.router, badges_routes.router, moderation_routes.router,
           orders_routes.router, store_routes.router, share_page.router, tracking_routes.router, push_routes.router, account_routes.router, email_routes.router,
-          reviews_routes.router):
+          reviews_routes.router, analytics_routes.router):
     app.include_router(r)
 
 
