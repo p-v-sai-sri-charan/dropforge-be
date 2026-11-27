@@ -105,7 +105,7 @@ MODELS = {"hoodie", "tee3d", "sleeveless", "sweatshirt", "croptop"}
 async def garment_model(name: str):
     if name not in MODELS:
         raise HTTPException(404, "Model not found")
-    return FileResponse(ROOT_DIR / "static" / f"{name}.glb", media_type="model/gltf-binary", headers={"Cache-Control": "public, max-age=86400"})
+    return FileResponse(ROOT_DIR / "static" / f"{name}.glb", media_type="model/gltf-binary", headers={"Cache-Control": "public, max-age=2592000, stale-while-revalidate=86400"})  # app requests ?v=MODEL_VERSION, so a long cache is safe
 
 
 @api_router.put("/config", response_model=PrintConfig)
