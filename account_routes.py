@@ -74,6 +74,7 @@ async def delete_account(body: DeleteIn, user: dict = Depends(current_user)):
 
     reviewed = [r["product_id"] async for r in db.reviews.find({"user_id": uid}, {"product_id": 1})]
     await db.reviews.delete_many({"user_id": uid})
+    await db.discounts.delete_many({"user_id": uid})  # personal (birthday) codes
     for pid in reviewed:
         await reviews_routes.refresh_rating(pid)
     for coll in (db.push_tokens, db.ai_keys, db.ai_credits, db.ai_images):

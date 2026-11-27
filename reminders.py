@@ -1,9 +1,10 @@
-"""Background jobs: a gentle reminder for checkouts that were started but never paid. Runs in every server worker;
+"""Background jobs: a gentle reminder for checkouts that were started but never paid, and birthday offers. Runs in every server worker;
 each order is claimed atomically, so it's reminded once no matter how many workers there are."""
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from birthday import send_birthday_offers
 from core import db
 from email_routes import email_order
 from push import notify_user
@@ -44,4 +45,10 @@ async def run_forever():
                 logger.info("sent %d checkout reminders", n)
         except Exception as e:  # never let the loop die
             logger.warning("checkout reminders failed: %s", e)
+        try:
+            n = await send_birthday_offers()
+            if n:
+                logger.info("sent %d birthday offers", n)
+        except Exception as e:
+            logger.warning("birthday offers failed: %s", e)
         await asyncio.sleep(EVERY_SECONDS)

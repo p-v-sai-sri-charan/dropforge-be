@@ -23,6 +23,8 @@ def admin(request: Request, pin: Optional[str]):
 class StoreSettings(BaseModel):
     first_order_pct: float = Field(ge=0, le=90)
     commission_pct: float = Field(ge=0, le=90)
+    birthday_pct: float = Field(default=15, ge=0, le=90)  # 0 = no birthday offers
+    creator_code_max_pct: float = Field(default=20, ge=0, le=50)  # highest discount a creator may give on their own products
 
 
 async def load_store() -> StoreSettings:
@@ -60,7 +62,7 @@ class DiscountIn(BaseModel):
 @router.get("/admin/discounts")
 async def list_discounts(request: Request, x_admin_pin: Optional[str] = Header(None)):
     admin(request, x_admin_pin)
-    return await db.discounts.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return await db.discounts.find({"kind": {"$ne": "birthday"}}, {"_id": 0}).sort("created_at", -1).to_list(500)  # personal birthday codes stay out of the list
 
 
 @router.post("/admin/discounts")
@@ -91,12 +93,84 @@ async def delete_discount(code: str, request: Request, x_admin_pin: Optional[str
     return {"ok": True}
 
 
-async def find_discount(code: str) -> dict:
+PAID = ["paid", "printed", "shipped", "delivered"]
+
+
+async def find_discount(code: str, user: Optional[dict] = None, item: Optional[dict] = None) -> dict:
+    """A usable code for this customer and item. Besides store-wide admin codes there are personal codes (birthday:
+    one customer, one use) and creator codes (only that creator's products, capped uses, once per customer)."""
     d = await db.discounts.find_one({"code": code.strip().upper()}, {"_id": 0})
     today = datetime.now(timezone.utc).date().isoformat()
     if not d or not d.get("active") or (d.get("expires_at") and d["expires_at"] < today):
         raise HTTPException(400, "This discount code is invalid or expired")
+    if d.get("user_id") and (not user or user["id"] != d["user_id"]):
+        raise HTTPException(400, "This discount code is invalid or expired")
+    if d.get("max_uses") and d.get("uses", 0) >= d["max_uses"]:
+        raise HTTPException(400, "This code has been fully used")
+    if d.get("creator_id") and (not item or item.get("creator_id") != d["creator_id"]):
+        raise HTTPException(400, "This code only works on that creator's products")
+    if d.get("once_per_user") and user and await db.orders.find_one({"user_id": user["id"], "discount_label": d["code"], "status": {"$in": PAID}}, {"_id": 1}):
+        raise HTTPException(400, "You've already used this code")
     return d
+
+
+# ---------- creator promo codes ----------
+class CreatorCodeIn(BaseModel):
+    code: str = Field(min_length=4, max_length=16, pattern=r"^[A-Za-z0-9]+$")
+    percent: float = Field(ge=5, le=50)
+    max_uses: int = Field(default=100, ge=1, le=1000)
+    expires_at: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class CodeActiveIn(BaseModel):
+    active: bool
+
+
+async def _code_stats(codes: list) -> dict:
+    """Paid orders and revenue (per currency) per code."""
+    out: dict = {}
+    async for o in db.orders.find({"discount_label": {"$in": codes}, "status": {"$in": PAID}}, {"discount_label": 1, "amount": 1, "currency": 1}):
+        st = out.setdefault(o["discount_label"], {"orders": 0, "revenue": {}})
+        st["orders"] += 1
+        st["revenue"][o["currency"]] = st["revenue"].get(o["currency"], 0) + o["amount"]
+    return out
+
+
+@router.get("/creators/codes")
+async def creator_codes(user: dict = Depends(current_user)):
+    c = await _creator(user, approved=True)
+    docs = await db.discounts.find({"creator_id": c["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    stats = await _code_stats([d["code"] for d in docs])
+    return {"max_pct": (await load_store()).creator_code_max_pct,
+            "codes": [{**d, **stats.get(d["code"], {"orders": 0, "revenue": {}})} for d in docs]}
+
+
+@router.post("/creators/codes")
+async def add_creator_code(body: CreatorCodeIn, user: dict = Depends(current_user)):
+    c = await _creator(user, approved=True)
+    cap = (await load_store()).creator_code_max_pct
+    if cap <= 0:
+        raise HTTPException(403, "Creator promo codes are switched off right now")
+    if body.percent > cap:
+        raise HTTPException(400, f"Creator codes can give at most {cap:g}% off")
+    if await db.discounts.count_documents({"creator_id": c["id"], "active": True}) >= 10:
+        raise HTTPException(400, "You can have up to 10 active codes. Pause one first")
+    code = body.code.upper()
+    if code.startswith("BDAY") or await db.discounts.find_one({"code": code}, {"_id": 1}):
+        raise HTTPException(409, "That code is taken. Try another")
+    doc = {"code": code, "percent": body.percent, "expires_at": body.expires_at, "active": True, "uses": 0, "max_uses": body.max_uses,
+           "creator_id": c["id"], "once_per_user": True, "kind": "creator", "created_at": now_iso()}
+    await db.discounts.insert_one(dict(doc))
+    return {**doc, "orders": 0, "revenue": {}}
+
+
+@router.patch("/creators/codes/{code}")
+async def toggle_creator_code(code: str, body: CodeActiveIn, user: dict = Depends(current_user)):
+    c = await _creator(user, approved=True)
+    r = await db.discounts.update_one({"code": code.upper(), "creator_id": c["id"]}, {"$set": {"active": body.active}})
+    if not r.matched_count:
+        raise HTTPException(404, "Code not found")
+    return {"code": code.upper(), "active": body.active}
 
 
 # ---------- categories ----------

@@ -96,7 +96,7 @@ async def quote_for(user: dict, body: OrderIn) -> dict:
         pct, label = store.first_order_pct, "FIRST ORDER"
     if body.discount_code and body.discount_code.strip():
         try:
-            d = await find_discount(body.discount_code)
+            d = await find_discount(body.discount_code, user, item)
             if d["percent"] > pct:
                 pct, label = d["percent"], d["code"]
         except HTTPException as e:
