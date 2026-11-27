@@ -54,6 +54,7 @@ async def public_user(user: dict) -> dict:
     return {
         **_public(user),
         **{k: user.get(k) for k in PROFILE_FIELDS},
+        "email_verified": bool(user.get("email") and user.get("email_verified")),
         "creator_status": c["status"] if c else None,  # None | "pending" | "approved" | "rejected"
     }
 
@@ -174,6 +175,8 @@ async def update_me(body: ProfileIn, user: dict = Depends(current_user)):
     sent = body.model_dump(exclude_unset=True)
     set_ = {k: v for k, v in sent.items() if v}
     unset = {k: "" for k, v in sent.items() if not v}
+    if "email" in sent and sent["email"] != user.get("email"):  # a new address has to be verified again
+        unset.update({"email_verified": "", "email_verified_at": ""})
     if set_ or unset:
         await db.users.update_one({"id": user["id"]}, {**({"$set": set_} if set_ else {}), **({"$unset": unset} if unset else {})})
     return await public_user(await db.users.find_one({"id": user["id"]}, {"_id": 0}))

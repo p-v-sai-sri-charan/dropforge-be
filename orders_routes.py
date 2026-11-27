@@ -14,6 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from config_store import LABELS, load_config
 from core import check_pin, client_ip, current_user, db
+from email_routes import email_order
 from push import notify_user
 from tracking_routes import Attribution
 
@@ -143,7 +144,9 @@ def _public(o: dict) -> dict:
 async def features():
     from auth_routes import sms_enabled
 
-    return {"payments": payments_enabled(), "sms": sms_enabled(), "support": os.environ.get("SUPPORT_CONTACT", "")}
+    from mailer import email_enabled
+
+    return {"payments": payments_enabled(), "sms": sms_enabled(), "email": email_enabled(), "support": os.environ.get("SUPPORT_CONTACT", "")}
 
 
 @router.post("/orders")
@@ -252,6 +255,7 @@ async def verify_order(body: VerifyIn, user: dict = Depends(current_user)):
                 "currency": saved["currency"], "pct": pct, "amount": int(round(saved["amount"] * pct / 100)), "status": "pending", "created_at": now,
             })
         await notify_user(saved["user_id"], "Order confirmed", f"We got your order for {saved['design_name']}. We'll let you know when it ships.", {"url": "/orders"})
+        await email_order({**saved, "status": "paid"}, "paid")
     doc = await db.orders.find_one({"_id": saved["_id"]})
     return _public(doc)
 
@@ -300,7 +304,8 @@ async def set_status(oid: str, body: StatusIn, request: Request, x_admin_pin: Op
     )
     pushed = await notify_user(o["user_id"], PUSH_TITLES[body.status], f"Order #{oid[:8].upper()} - {o['design_name']}", {"url": "/orders"})
     doc = await db.orders.find_one({"id": oid})
-    return {**_public(doc), "sms_sent": sms, "push_sent": pushed}
+    emailed = await email_order(doc, body.status)
+    return {**_public(doc), "sms_sent": sms, "push_sent": pushed, "email_sent": emailed}
 
 
 PUSH_TITLES = {
@@ -351,6 +356,7 @@ async def mark_refunded(oid: str, request: Request, x_admin_pin: Optional[str] =
         raise HTTPException(404, "No refund is due for this order")
     o = await db.orders.find_one({"id": oid})
     await notify_user(o["user_id"], "Refund issued", f"Your refund for {o['design_name']} is on its way.", {"url": "/orders"})
+    await email_order(o, "refunded")
     return _public(o)
 
 
