@@ -64,3 +64,22 @@ def test_abandoned_checkout_reminders():
     assert pushed == [("r1", "Your design is waiting")] and emailed == [("a1", "reminder")]
     assert run(reminders.remind_abandoned_checkouts()) == 0  # never twice
     assert run(mdb.orders.find_one({"id": "a4"})).get("reminded_at")  # claimed, but skipped
+
+
+def test_admin_orders_tabs_search_and_paging():
+    run(mdb.orders.insert_many([
+        {"id": f"zz{i:04d}abcd", "user_id": "x", "status": ["paid", "shipped", "created"][i % 3], "design_name": "Moon" if i == 7 else "Tee",
+         "created_at": f"2026-10-{1 + i % 28:02d}T00:00:{i % 60:02d}+00:00", "shipping": {"name": "Ravi", "city": "Pune"}}
+        for i in range(300)
+    ]))
+    allp = c.get("/api/admin/orders", params={"tab": "all", "limit": 200}).json()
+    more = c.get("/api/admin/orders", params={"tab": "all", "skip": 200, "limit": 200}).json()
+    ids = [o["id"] for o in allp + more]
+    assert len([i for i in ids if i.startswith("zz")]) == 300 and len(set(ids)) == len(ids)  # every order reachable, no repeats
+    todo = c.get("/api/admin/orders", params={"tab": "todo"}).json()
+    assert todo and all(o["status"] in ("paid", "printed") for o in todo)
+    assert [o["id"] for o in c.get("/api/admin/orders", params={"q": "moon"}).json() if o["id"].startswith("zz")] == ["zz0007abcd"]
+    assert [o["id"] for o in c.get("/api/admin/orders", params={"q": "#ZZ0123"}).json()] == ["zz0123abcd"]
+    counts = c.get("/api/admin/orders/counts").json()
+    assert counts["unpaid"] >= 100 and set(counts) == {"todo", "shipped", "delivered", "cancelled", "unpaid", "all"}
+    assert c.get("/api/admin/orders", params={"tab": "nope"}).status_code == 422

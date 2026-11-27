@@ -4,6 +4,7 @@ import ipaddress
 import os
 import time
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
@@ -81,6 +82,15 @@ def client_ip(request: Request) -> str:
         if not _is_proxy(p):
             return p
     return chain[0] if chain else peer
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def ist_day(when: Optional[datetime] = None) -> str:
+    """Calendar day in India time ("2026-11-28"). Stored on orders, sign-ups and visits so daily reports group in the database."""
+    when = when or datetime.now(timezone.utc)
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).astimezone(IST).date().isoformat()
 
 
 # Admin access = signed in (OTP) with a phone listed in ADMIN_PHONES (comma separated).

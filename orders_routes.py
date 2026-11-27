@@ -5,15 +5,16 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
+import re
 from typing import Literal, Optional
 
 import razorpay
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from config_store import LABELS, load_config
-from core import check_pin, client_ip, current_user, db
+from core import check_pin, client_ip, current_user, db, ist_day
 from email_routes import email_order
 from push import notify_user
 from tracking_routes import Attribution
@@ -204,6 +205,7 @@ async def create_order(body: OrderIn, user: dict = Depends(current_user)):
         "print_areas": areas,
         "attribution": (body.attribution.clean() if body.attribution else None) or user.get("attribution"),
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "day": ist_day(),  # India-time day, for daily reports
     }
     await db.orders.insert_one(dict(order))
     return {
@@ -401,11 +403,48 @@ async def my_orders(user: dict = Depends(current_user)):
     return [_public(d) for d in docs]
 
 
+ADMIN_TABS = {
+    "todo": {"status": {"$in": ["paid", "printed"]}},
+    "shipped": {"status": "shipped"},
+    "delivered": {"status": "delivered"},
+    "cancelled": {"status": "cancelled"},
+    "unpaid": {"status": "created"},
+    "all": {},
+}
+
+
+def _admin_query(tab: str, q: Optional[str]) -> dict:
+    query = dict(ADMIN_TABS.get(tab, {}))
+    term = (q or "").strip()[:60]
+    if term:
+        rx = {"$regex": re.escape(term), "$options": "i"}
+        query["$or"] = [
+            {"id": {"$regex": "^" + re.escape(term.lower().lstrip("#"))}},  # order number prefix (uses the index)
+            {"design_name": rx}, {"phone": rx}, {"shipping.name": rx}, {"shipping.city": rx},
+        ]
+    return query
+
+
 @router.get("/admin/orders")
-async def admin_orders(request: Request, x_admin_pin: Optional[str] = Header(None)):
+async def admin_orders(
+    request: Request,
+    tab: str = Query("all", pattern="^(todo|shipped|delivered|cancelled|unpaid|all)$"),
+    q: Optional[str] = Query(None, max_length=60),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=200),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Newest first, a page at a time. Filtering and search run in the database, so older orders stay reachable."""
     check_pin(x_admin_pin, client_ip(request))
-    docs = await db.orders.find({}).sort("created_at", -1).to_list(200)
+    docs = await db.orders.find(_admin_query(tab, q), {"design_snapshot": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
     return [_public(d) for d in docs]
+
+
+@router.get("/admin/orders/counts")
+async def admin_order_counts(request: Request, q: Optional[str] = Query(None, max_length=60), x_admin_pin: Optional[str] = Header(None)):
+    """How many orders are in each tab (indexed counts)."""
+    check_pin(x_admin_pin, client_ip(request))
+    return {t: await db.orders.count_documents(_admin_query(t, q)) for t in ADMIN_TABS}
 
 
 def _layer_out(l: dict) -> dict:

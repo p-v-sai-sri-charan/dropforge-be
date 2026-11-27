@@ -32,6 +32,7 @@ def test_update_and_clear():
     assert r.status_code == 200, r.text
     me = r.json()
     assert (me["name"], me["email"], me["dob"], me["gender"]) == ("Asha Rao", "asha@example.com", "1999-04-12", "female")
+    assert run(mdb.users.find_one({"id": "u1"}))["dob_md"] == "04-12"  # birthday job looks this up by index
     # partial update leaves the rest alone; empty string clears
     me = c.put("/api/auth/me", headers=H, json={"email": ""}).json()
     assert me["email"] is None and me["name"] == "Asha Rao"

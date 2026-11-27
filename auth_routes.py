@@ -13,7 +13,7 @@ import phonenumbers
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
-from core import client_ip, current_user, db, is_admin_phone, make_token
+from core import client_ip, current_user, db, ist_day, is_admin_phone, make_token
 from regions import region_for_phone
 
 router = APIRouter(prefix="/api/auth")
@@ -201,7 +201,8 @@ async def verify_otp(body: VerifyBody):
         if (await db.users.update_one({"phone": raw}, {"$set": {"phone": phone}})).modified_count:
             user = await db.users.find_one({"phone": phone}, {"_id": 0})
     if not user:
-        user = {"id": str(uuid.uuid4()), "phone": phone, "created_at": datetime.now(timezone.utc).isoformat()}
+        now = datetime.now(timezone.utc)
+        user = {"id": str(uuid.uuid4()), "phone": phone, "created_at": now.isoformat(), "day": ist_day(now)}
         await db.users.insert_one(dict(user))
     return {"token": make_token(user["id"]), "user": await public_user(user)}
 
@@ -216,6 +217,11 @@ async def update_me(body: ProfileIn, user: dict = Depends(current_user)):
     sent = body.model_dump(exclude_unset=True)
     set_ = {k: v for k, v in sent.items() if v}
     unset = {k: "" for k, v in sent.items() if not v}
+    if "dob" in sent:  # month-day kept separately so the birthday job can use an index ("06-05")
+        if sent["dob"]:
+            set_["dob_md"] = sent["dob"][5:]
+        else:
+            unset["dob_md"] = ""
     if "email" in sent and sent["email"] != user.get("email"):  # a new address has to be verified again
         unset.update({"email_verified": "", "email_verified_at": ""})
     if set_ or unset:

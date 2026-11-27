@@ -204,6 +204,16 @@ for r in (geo.router, auth_routes.router, designs_routes.router, files_routes.ro
     app.include_router(r)
 
 
+async def _prepare_database():
+    import db_indexes
+    import migrations
+
+    await migrations.run()  # first, so new fields exist before their indexes
+    r = await db_indexes.ensure_all()
+    if r["not_unique_because_of_duplicates"]:
+        logger.warning("duplicate records found (see warnings above): %s", r["not_unique_because_of_duplicates"])
+
+
 @app.on_event("startup")
 async def startup():
     fonts_routes.start_seed()
@@ -218,6 +228,7 @@ async def startup():
     await email_routes.ensure_indexes()
     await reviews_routes.ensure_indexes()
     asyncio.create_task(reminders.run_forever())  # abandoned-checkout reminders
+    asyncio.create_task(_prepare_database())  # indexes + one-time data fixes, without delaying startup
 
 app.middleware("http")(rate_limit)  # inside CORS so 429s carry CORS headers
 app.add_middleware(

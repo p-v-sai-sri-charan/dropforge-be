@@ -35,9 +35,9 @@ NOON_IST_JUN5 = datetime(2026, 6, 5, 7, 0, tzinfo=timezone.utc)
 
 def test_birthday_offer_once_per_year():
     run(mdb.users.insert_many([
-        {"id": "u1", "phone": "+91a", "name": "Ravi K", "dob": "1999-06-05", "email": "r@x.in", "email_verified": True},
-        {"id": "u2", "phone": "+91b", "dob": "2001-06-05", "push_promotions": False, "email": "n@x.in"},
-        {"id": "u3", "phone": "+91c", "dob": "2001-06-06"},
+        {"id": "u1", "phone": "+91a", "name": "Ravi K", "dob": "1999-06-05", "dob_md": "06-05", "email": "r@x.in", "email_verified": True},
+        {"id": "u2", "phone": "+91b", "dob": "2001-06-05", "dob_md": "06-05", "push_promotions": False, "email": "n@x.in"},
+        {"id": "u3", "phone": "+91c", "dob": "2001-06-06", "dob_md": "06-06"},
     ]))
     assert run(birthday.send_birthday_offers(datetime(2026, 6, 4, 20, 0, tzinfo=timezone.utc))) == 0  # 1:30am IST: too early
     assert run(birthday.send_birthday_offers(NOON_IST_JUN5)) == 2

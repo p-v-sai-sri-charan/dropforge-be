@@ -386,9 +386,13 @@ async def creator_me(user: dict = Depends(current_user)):
         return {"creator": None}
     if c["status"] == "approved":
         c = await _ensure_slug(c)
-    earn = await db.earnings.find({"creator_id": c["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    earn = await db.earnings.find({"creator_id": c["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # totals over every earning, not just the latest page shown
+    totals = {r["_id"]: r["amount"] for r in await db.earnings.aggregate([
+        {"$match": {"creator_id": c["id"]}}, {"$group": {"_id": "$status", "amount": {"$sum": "$amount"}}},
+    ]).to_list(None)}
     store = await load_store()
-    return {"creator": _mask(c), "earnings": earn, "commission_pct": store.commission_pct}
+    return {"creator": _mask(c), "earnings": earn, "totals": {"pending": totals.get("pending", 0), "paid": totals.get("paid", 0)}, "commission_pct": store.commission_pct}
 
 
 @router.get("/creators/products")
@@ -515,9 +519,15 @@ class CreatorReview(BaseModel):
 async def admin_creators(request: Request, x_admin_pin: Optional[str] = Header(None)):
     admin(request, x_admin_pin)
     creators = await db.creators.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    earn = await db.earnings.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    ids = [c["id"] for c in creators]
+    by_creator: dict = {i: [] for i in ids}
+    # every unpaid earning (so no payout is ever missed), plus each creator's latest paid ones for context
+    async for e in db.earnings.find({"creator_id": {"$in": ids}, "status": "pending"}, {"_id": 0}).sort("created_at", -1):
+        by_creator[e["creator_id"]].append(e)
+    for cid in ids:
+        by_creator[cid] += await db.earnings.find({"creator_id": cid, "status": "paid"}, {"_id": 0}).sort("created_at", -1).to_list(20)
     for c in creators:
-        c["earnings"] = [e for e in earn if e["creator_id"] == c["id"]]
+        c["earnings"] = by_creator[c["id"]]
     return creators
 
 

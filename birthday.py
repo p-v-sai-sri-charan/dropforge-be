@@ -36,11 +36,11 @@ async def send_birthday_offers(now: datetime | None = None) -> int:
     if pct <= 0:
         return 0
     year = local.year
-    pattern = "(" + "|".join(k.replace("-", "\\-") + "$" for k in _birthday_keys(local.date())) + ")"
+    days = [k[1:] for k in _birthday_keys(local.date())]  # "-06-05" -> "06-05"
     sent = 0
     while True:
         u = await db.users.find_one_and_update(
-            {"dob": {"$regex": pattern}, "birthday_offer_year": {"$ne": year}, "deleted": {"$ne": True}},
+            {"dob_md": {"$in": days}, "birthday_offer_year": {"$ne": year}, "deleted": {"$ne": True}},  # indexed
             {"$set": {"birthday_offer_year": year}},
         )
         if not u:

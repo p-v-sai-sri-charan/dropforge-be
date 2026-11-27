@@ -80,7 +80,13 @@ def test_push_register_prefs_broadcast():
     assert c.post("/api/admin/push/broadcast", json={"title": "Sale", "body": "20% off hoodies"}).json() == {"devices": 1}  # dry run default
     assert sent == []
     r = c.post("/api/admin/push/broadcast", json={"title": "Sale", "body": "20% off hoodies", "url": "/shop", "dry_run": False}).json()
-    assert r["sent"] == 1 and sent[-1][3] == {"url": "/shop", "kind": "promotion"}
+    assert r["status"] == "sending" and r["devices"] == 1  # returns at once; sending carries on in the background
+    for _ in range(50):  # wait for the background send to finish
+        done = c.get("/api/admin/push/campaigns").json()[0]
+        if done.get("status") == "sent":
+            break
+        import time; time.sleep(0.05)
+    assert done["status"] == "sent" and done["sent"] == 1 and sent[-1][3] == {"url": "/shop", "kind": "promotion"}
     assert c.post("/api/admin/push/broadcast", json={"title": "x", "body": "bad link", "url": "https://evil.example"}).status_code == 422
     assert c.post("/api/admin/push/broadcast", json={"title": "x", "body": "bad link", "url": "//evil.example"}).status_code == 422
     # opting out removes the user from promotions

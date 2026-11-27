@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
-from core import check_pin, client_ip, db, optional_user
+from core import check_pin, client_ip, db, ist_day, optional_user
 
 router = APIRouter(prefix="/api")
 
@@ -61,6 +61,7 @@ async def track(body: EventIn, user: Optional[dict] = Depends(optional_user)):
         "medium": (attr or {}).get("medium"),
         "campaign": (attr or {}).get("campaign"),
         "at": datetime.now(timezone.utc),  # a real date, for the TTL index
+        "day": ist_day(),  # India-time day, for daily visitor counts
     })
     if user and attr:  # first campaign that brought this customer, kept on their profile
         await db.users.update_one({"id": user["id"], "attribution": {"$exists": False}}, {"$set": {"attribution": attr}})
@@ -91,22 +92,25 @@ async def campaigns(request: Request, days: int = Query(30, ge=1, le=365), x_adm
                          "orders": 0, "revenue": {}}
         return rows[key]
 
+    # Two steps instead of collecting every visitor id into one list per campaign: with lots of traffic that list
+    # would pass MongoDB's 16 MB per-document limit and the report would fail.
     events = db.events.aggregate([
         {"$match": {"at": {"$gte": since}}},
-        {"$group": {"_id": {"s": "$source", "c": "$campaign", "e": "$event"}, "n": {"$sum": 1}, "who": {"$addToSet": "$anon_id"}}},
-    ])
+        {"$group": {"_id": {"s": "$source", "c": "$campaign", "e": "$event", "a": "$anon_id"}, "n": {"$sum": 1}}},
+        {"$group": {"_id": {"s": "$_id.s", "c": "$_id.c", "e": "$_id.e"}, "n": {"$sum": "$n"}, "who": {"$sum": 1}}},
+    ], allowDiskUse=True)
     async for g in events:
         r = row(g["_id"].get("s"), g["_id"].get("c"))
         e = g["_id"]["e"]
         if e == "visit":
-            r["visitors"] += len(g["who"])
+            r["visitors"] += g["who"]
         elif e in FUNNEL:
             r[FUNNEL[e]] += g["n"]
 
     orders = db.orders.aggregate([
         {"$match": {"status": {"$in": PAID}, "paid_at": {"$gte": since.isoformat()}}},
         {"$group": {"_id": {"s": "$attribution.source", "c": "$attribution.campaign", "cur": "$currency"}, "n": {"$sum": 1}, "amt": {"$sum": "$amount"}}},
-    ])
+    ], allowDiskUse=True)
     async for g in orders:
         r = row(g["_id"].get("s"), g["_id"].get("c"))
         r["orders"] += g["n"]
