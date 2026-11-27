@@ -3,10 +3,11 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
@@ -45,6 +46,63 @@ UNSUPPORTED = "Sign-in is available for India, US, UK, UAE and Euro-zone phone n
 def _public(user: dict) -> dict:
     region = region_for_phone(user["phone"]) or {"country": "IN", "currency": "INR"}
     return {"id": user["id"], "phone": user["phone"], "is_admin": is_admin_phone(user["phone"]), "admin_mode": "otp", **region}
+
+
+async def public_user(user: dict) -> dict:
+    """The signed-in user as the app sees it: identity, region, profile details and creator status."""
+    c = await db.creators.find_one({"user_id": user["id"]}, {"_id": 0, "status": 1})
+    return {
+        **_public(user),
+        **{k: user.get(k) for k in PROFILE_FIELDS},
+        "creator_status": c["status"] if c else None,  # None | "pending" | "approved" | "rejected"
+    }
+
+
+PROFILE_FIELDS = ("name", "email", "dob", "gender")
+GENDERS = ("female", "male", "non_binary", "other", "prefer_not_to_say")
+EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[A-Za-z]{2,}$")
+
+
+class ProfileIn(BaseModel):
+    """Optional profile details. Send only the fields being changed; an empty string / null clears a field."""
+    name: Optional[str] = Field(default=None, max_length=60)
+    email: Optional[str] = Field(default=None, max_length=120)
+    dob: Optional[str] = Field(default=None, max_length=10)  # YYYY-MM-DD
+    gender: Optional[Literal["female", "male", "non_binary", "other", "prefer_not_to_say", ""]] = None
+
+    @field_validator("name")
+    @classmethod
+    def name_ok(cls, v):
+        v = " ".join((v or "").split())
+        if v and len(v) < 2:
+            raise ValueError("Name is too short")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def email_ok(cls, v):
+        v = (v or "").strip().lower()
+        if v and not EMAIL.match(v):
+            raise ValueError("Enter a valid email address")
+        return v
+
+    @field_validator("dob")
+    @classmethod
+    def dob_ok(cls, v):
+        v = (v or "").strip()
+        if not v:
+            return v
+        try:
+            d = date.fromisoformat(v)
+        except ValueError:
+            raise ValueError("Enter your date of birth as DD/MM/YYYY")
+        today = date.today()
+        age = today.year - d.year - ((today.month, today.day) < (d.month, d.day))
+        if d > today or age > 120:
+            raise ValueError("Enter a real date of birth")
+        if age < 13:
+            raise ValueError("You must be at least 13 to use DropForge")
+        return d.isoformat()
 
 
 class PhoneBody(BaseModel):
@@ -103,9 +161,19 @@ async def verify_otp(body: VerifyBody):
     if not user:
         user = {"id": str(uuid.uuid4()), "phone": phone, "created_at": datetime.now(timezone.utc).isoformat()}
         await db.users.insert_one(dict(user))
-    return {"token": make_token(user["id"]), "user": _public(user)}
+    return {"token": make_token(user["id"]), "user": await public_user(user)}
 
 
 @router.get("/me")
 async def me(user: dict = Depends(current_user)):
-    return _public(user)
+    return await public_user(user)
+
+
+@router.put("/me")
+async def update_me(body: ProfileIn, user: dict = Depends(current_user)):
+    sent = body.model_dump(exclude_unset=True)
+    set_ = {k: v for k, v in sent.items() if v}
+    unset = {k: "" for k, v in sent.items() if not v}
+    if set_ or unset:
+        await db.users.update_one({"id": user["id"]}, {**({"$set": set_} if set_ else {}), **({"$unset": unset} if unset else {})})
+    return await public_user(await db.users.find_one({"id": user["id"]}, {"_id": 0}))
