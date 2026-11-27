@@ -2,6 +2,7 @@ from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.cors import CORSMiddleware
+import asyncio
 import os
 import re
 import json
@@ -43,6 +44,7 @@ import tracking_routes
 import push_routes
 import account_routes
 import email_routes
+import reminders
 
 anthropic_client = AsyncAnthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
 CLAUDE_MODEL = "claude-sonnet-5-5"
@@ -211,6 +213,7 @@ async def startup():
     await tracking_routes.ensure_indexes()
     await push_routes.ensure_indexes()
     await email_routes.ensure_indexes()
+    asyncio.create_task(reminders.run_forever())  # abandoned-checkout reminders
 
 app.middleware("http")(rate_limit)  # inside CORS so 429s carry CORS headers
 app.add_middleware(

@@ -260,8 +260,30 @@ async def verify_order(body: VerifyIn, user: dict = Depends(current_user)):
     return _public(doc)
 
 
-class StatusIn(BaseModel):
+class TrackingIn(BaseModel):
+    courier: Optional[str] = Field(default=None, max_length=40)
+    tracking_number: Optional[str] = Field(default=None, max_length=40, pattern=r"^[A-Za-z0-9-]+$")
+    tracking_url: Optional[str] = Field(default=None, max_length=300, pattern=r"^https://[^\s<>\"']+$")
+
+
+class StatusIn(TrackingIn):
     status: Literal["paid", "printed", "shipped", "delivered", "cancelled"]
+
+
+# Courier tracking pages that can be built from just the AWB / tracking number. Anything else: give the link.
+TRACK_URLS = {"shiprocket": "https://shiprocket.co/tracking/{n}"}
+
+
+def tracking_fields(t: TrackingIn) -> dict:
+    out = {}
+    if t.courier:
+        out["courier"] = t.courier.strip()
+    if t.tracking_number:
+        out["tracking_number"] = t.tracking_number.strip()
+    url = t.tracking_url or (TRACK_URLS[t.courier.strip().lower()].format(n=t.tracking_number) if t.courier and t.tracking_number and t.courier.strip().lower() in TRACK_URLS else None)
+    if url:
+        out["tracking_url"] = url
+    return out
 
 
 def send_sms(to: str, text: str) -> bool:
@@ -296,7 +318,7 @@ async def set_status(oid: str, body: StatusIn, request: Request, x_admin_pin: Op
             await db.catalog_products.update_one({"id": o["product_id"]}, {"$inc": {f"stock.{o['size']}": o["qty"]}})
         await db.earnings.update_many({"order_id": oid, "status": "pending"}, {"$set": {"status": "void"}})
     now = datetime.now(timezone.utc).isoformat()
-    patch = {"status": body.status, **({"refund_due": True} if body.status == "cancelled" else {})}
+    patch = {"status": body.status, **({"refund_due": True} if body.status == "cancelled" else {}), **(tracking_fields(body) if body.status == "shipped" else {})}
     await db.orders.update_one({"id": oid}, {"$set": patch, "$push": {"history": {"status": body.status, "at": now}}})
     phone = o.get("phone") or (await db.users.find_one({"id": o["user_id"]}, {"phone": 1}) or {}).get("phone")
     sms = bool(phone) and await run_in_threadpool(
@@ -315,6 +337,19 @@ PUSH_TITLES = {
     "delivered": "Your order was delivered",
     "cancelled": "Your order was cancelled",
 }
+
+@router.patch("/admin/orders/{oid}/tracking")
+async def set_tracking(oid: str, body: TrackingIn, request: Request, x_admin_pin: Optional[str] = Header(None)):
+    """Add or correct the courier / tracking number on a shipped order (the customer sees a "Track parcel" link)."""
+    check_pin(x_admin_pin, client_ip(request))
+    fields = tracking_fields(body)
+    if not fields:
+        raise HTTPException(400, "Add a tracking number or link")
+    r = await db.orders.update_one({"id": oid, "status": {"$in": ["shipped", "delivered"]}}, {"$set": fields})
+    if not r.matched_count:
+        raise HTTPException(400, "Only shipped orders have tracking")
+    return _public(await db.orders.find_one({"id": oid}))
+
 
 SUPPORT_HINT = "Custom design orders can't be cancelled. If you need help, contact support."
 CANCEL_MESSAGES = {
