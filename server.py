@@ -12,6 +12,17 @@ from typing import Optional
 
 from anthropic import AsyncAnthropic
 
+if os.environ.get("SENTRY_DSN"):  # error monitoring; off unless configured
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=os.environ["SENTRY_DSN"],
+        environment=os.environ.get("SENTRY_ENV", "production"),
+        traces_sample_rate=float(os.environ.get("SENTRY_TRACES_RATE", "0.1")),
+        send_default_pii=False,  # no IPs, auth headers or user data
+        max_request_body_size="never",  # bodies hold OTP codes, addresses and KYC details
+    )
+
 from core import ROOT_DIR, admin_context, check_pin, client, client_ip, db, optional_user
 from config_store import DEFAULT_CONFIG, PrintConfig, load_config
 from ai_guard import guard
